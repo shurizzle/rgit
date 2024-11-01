@@ -76,6 +76,8 @@ pub struct Args {
     /// Configures the metadata refresh interval (eg. "never" or "60s")
     #[clap(long, default_value_t = RefreshInterval::Duration(Duration::from_secs(300)))]
     refresh_interval: RefreshInterval,
+    #[clap(long)]
+    projects_list: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -123,7 +125,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let db = open_db(&args)?;
 
     let indexer_wakeup_task =
-        run_indexer(db.clone(), args.scan_path.clone(), args.refresh_interval);
+        run_indexer(db.clone(), args.scan_path.clone(), args.projects_list.clone(), args.refresh_interval);
 
     let bat_assets = HighlightingAssets::from_binary();
     let syntax_set = bat_assets.get_syntax_set().unwrap().clone();
@@ -273,13 +275,14 @@ fn open_db(args: &Args) -> Result<Arc<rocksdb::DB>, anyhow::Error> {
 async fn run_indexer(
     db: Arc<rocksdb::DB>,
     scan_path: PathBuf,
+    projects_list: Option<PathBuf>,
     refresh_interval: RefreshInterval,
 ) -> Result<(), tokio::task::JoinError> {
     let (indexer_wakeup_send, mut indexer_wakeup_recv) = mpsc::channel(10);
 
     std::thread::spawn(move || loop {
         info!("Running periodic index");
-        crate::database::indexer::run(&scan_path, &db);
+        crate::database::indexer::run(&scan_path, projects_list.as_deref(), &db);
         info!("Finished periodic index");
 
         if indexer_wakeup_recv.blocking_recv().is_none() {

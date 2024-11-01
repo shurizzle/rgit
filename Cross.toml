@@ -1,0 +1,8 @@
+[build]
+pre-build = [
+  "dpkg --add-architecture $CROSS_DEB_ARCH",
+  "apt-get update --assume-yes && apt-get install --assume-yes --no-install-recommends libssl-dev:$CROSS_DEB_ARCH libgit2-dev:$CROSS_DEB_ARCH libclang-10-dev",
+]
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"

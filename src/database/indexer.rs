@@ -2,6 +2,8 @@ use std::{
     collections::HashSet,
     ffi::OsStr,
     fmt::Debug,
+    fs::File,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -20,15 +22,15 @@ use crate::database::schema::{
     tag::{Tag, TagTree},
 };
 
-pub fn run(scan_path: &Path, db: &Arc<rocksdb::DB>) {
+pub fn run(scan_path: &Path, projects_list: Option<&Path>, db: &Arc<rocksdb::DB>) {
     let span = info_span!("index_update");
     let _entered = span.enter();
 
     info!("Starting index update");
 
-    update_repository_metadata(scan_path, db);
-    update_repository_reflog(scan_path, db.clone());
-    update_repository_tags(scan_path, db.clone());
+    let projects = update_repository_metadata(scan_path, projects_list, db);
+    update_repository_reflog(scan_path, projects.as_ref(), db.clone());
+    update_repository_tags(scan_path, projects.as_ref(), db.clone());
 
     info!("Flushing to disk");
 
@@ -40,9 +42,18 @@ pub fn run(scan_path: &Path, db: &Arc<rocksdb::DB>) {
 }
 
 #[instrument(skip(db))]
-fn update_repository_metadata(scan_path: &Path, db: &rocksdb::DB) {
+fn update_repository_metadata(
+    scan_path: &Path,
+    projects_list: Option<&Path>,
+    db: &rocksdb::DB,
+) -> Option<HashSet<PathBuf>> {
     let mut discovered = Vec::new();
-    discover_repositories(scan_path, &mut discovered);
+    discover_repositories(scan_path, projects_list, &mut discovered);
+    let mut projects = if projects_list.is_some() {
+        Some(HashSet::new())
+    } else {
+        None
+    };
 
     for repository in discovered {
         let Some(relative) = get_relative_path(scan_path, &repository) else {
@@ -79,6 +90,7 @@ fn update_repository_metadata(scan_path: &Path, db: &rocksdb::DB) {
                 continue;
             }
         };
+        projects.as_mut().map(|p| p.insert(relative.to_path_buf()));
 
         git_repository.object_cache_size(10 * 1024 * 1024);
 
@@ -100,6 +112,8 @@ fn update_repository_metadata(scan_path: &Path, db: &rocksdb::DB) {
             warn!(%error, "Failed to insert repository");
         }
     }
+
+    projects
 }
 
 fn find_default_branch(repo: &gix::Repository) -> Result<Option<String>, anyhow::Error> {
@@ -130,8 +144,12 @@ fn find_last_committed_time(repo: &gix::Repository) -> Result<OffsetDateTime, an
     Ok(timestamp)
 }
 
-#[instrument(skip(db))]
-fn update_repository_reflog(scan_path: &Path, db: Arc<rocksdb::DB>) {
+#[instrument(skip(projects, db))]
+fn update_repository_reflog(
+    scan_path: &Path,
+    projects: Option<&HashSet<PathBuf>>,
+    db: Arc<rocksdb::DB>,
+) {
     let repos = match Repository::fetch_all(&db) {
         Ok(v) => v,
         Err(error) => {
@@ -141,8 +159,13 @@ fn update_repository_reflog(scan_path: &Path, db: Arc<rocksdb::DB>) {
     };
 
     for (relative_path, db_repository) in repos {
-        let Some(git_repository) = open_repo(scan_path, &relative_path, db_repository.get(), &db)
-        else {
+        let Some(git_repository) = open_repo(
+            scan_path,
+            &relative_path,
+            projects,
+            db_repository.get(),
+            &db,
+        ) else {
             continue;
         };
 
@@ -294,8 +317,12 @@ fn branch_index_update(
     Ok(())
 }
 
-#[instrument(skip(db))]
-fn update_repository_tags(scan_path: &Path, db: Arc<rocksdb::DB>) {
+#[instrument(skip(projects, db))]
+fn update_repository_tags(
+    scan_path: &Path,
+    projects: Option<&HashSet<PathBuf>>,
+    db: Arc<rocksdb::DB>,
+) {
     let repos = match Repository::fetch_all(&db) {
         Ok(v) => v,
         Err(error) => {
@@ -305,8 +332,13 @@ fn update_repository_tags(scan_path: &Path, db: Arc<rocksdb::DB>) {
     };
 
     for (relative_path, db_repository) in repos {
-        let Some(git_repository) = open_repo(scan_path, &relative_path, db_repository.get(), &db)
-        else {
+        let Some(git_repository) = open_repo(
+            scan_path,
+            &relative_path,
+            projects,
+            db_repository.get(),
+            &db,
+        ) else {
             continue;
         };
 
@@ -381,13 +413,26 @@ fn tag_index_delete(tag_name: &str, tag_tree: &TagTree) -> Result<(), anyhow::Er
     Ok(())
 }
 
-#[instrument(skip(scan_path, db_repository, db))]
+#[instrument(skip(scan_path, projects, db_repository, db))]
 fn open_repo<P: AsRef<Path> + Debug>(
     scan_path: &Path,
     relative_path: P,
+    projects: Option<&HashSet<PathBuf>>,
     db_repository: &ArchivedRepository,
     db: &rocksdb::DB,
 ) -> Option<gix::Repository> {
+    if let Some(projects) = projects {
+        if !projects.contains(relative_path.as_ref()) {
+            warn!("Repository gone from projects file, removing from db");
+
+            if let Err(error) = db_repository.delete(db, relative_path) {
+                warn!(%error, "Failed to delete dangling index");
+            }
+
+            return None;
+        }
+    }
+
     match gix::open(scan_path.join(relative_path.as_ref())) {
         Ok(mut v) => {
             v.object_cache_size(10 * 1024 * 1024);
@@ -413,7 +458,41 @@ fn get_relative_path<'a>(relative_to: &Path, full_path: &'a Path) -> Option<&'a 
     full_path.strip_prefix(relative_to).ok()
 }
 
-fn discover_repositories(current: &Path, discovered_repos: &mut Vec<PathBuf>) {
+fn discover_repositories(
+    current: &Path,
+    projects_list: Option<&Path>,
+    discovered_repos: &mut Vec<PathBuf>,
+) {
+    if let Some(projects_list) = projects_list {
+        let mut f = match File::open(projects_list) {
+            Ok(f) => BufReader::new(f),
+            Err(error) => {
+                error!(%error, "Failed to open projects.list {}", projects_list.display());
+                return;
+            }
+        };
+        let mut buffer = String::new();
+        loop {
+            buffer.clear();
+            match f.read_line(&mut buffer) {
+                Ok(0) => return,
+                Ok(_) => (),
+                Err(error) => {
+                    error!(%error, "Failed to read projects.list {}", projects_list.display());
+                    return;
+                }
+            };
+            let line = buffer.strip_suffix('\n').map_or(buffer.as_str(), |line| {
+                line.strip_suffix('r').unwrap_or(line)
+            });
+            discovered_repos.push(current.join(line));
+        }
+    } else {
+        discover_repositories_recursive(current, discovered_repos);
+    }
+}
+
+fn discover_repositories_recursive(current: &Path, discovered_repos: &mut Vec<PathBuf>) {
     let current = match std::fs::read_dir(current) {
         Ok(v) => v,
         Err(error) => {
@@ -433,7 +512,7 @@ fn discover_repositories(current: &Path, discovered_repos: &mut Vec<PathBuf>) {
             discovered_repos.push(dir);
         } else {
             // probably not a bare git repo, lets recurse deeper
-            discover_repositories(&dir, discovered_repos);
+            discover_repositories_recursive(&dir, discovered_repos);
         }
     }
 }

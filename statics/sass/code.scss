@@ -19,7 +19,7 @@ pre {
     counter-increment: line;
 
     @media (prefers-color-scheme: dark) {
-      color: #abb2bf;
+      color: $darkModeTextColour;
     }
 
     &::before {

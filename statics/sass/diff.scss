@@ -1,12 +1,14 @@
+@import 'colours';
+
 pre.diff {
   @media (prefers-color-scheme: dark) {
-    color: #abb2bf;
+    color: $darkModeTextColour;
   }
 }
 
 .diff-add-line::before, .diff-remove-line::before, .diff-context::before {
   display: inline-block;
-  color: #888;
+  color: #757575;
   -webkit-user-select: none;
 }
 

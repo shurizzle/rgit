@@ -6,7 +6,7 @@
 
 @media (prefers-color-scheme: dark) {
   html {
-    background: #000;
+    background: #282828;
     color: $darkModeTextColour;
   }
 
@@ -35,7 +35,7 @@ nav {
   }
 
   @media (prefers-color-scheme: dark) {
-    border-bottom-color: $darkModeHighlightColour;
+    border-bottom-color: #2F90FE;
   }
 
   a {
@@ -52,7 +52,7 @@ nav {
       background-color: #ccc;
 
       @media (prefers-color-scheme: dark) {
-        background: $darkModeHighlightColour;
+        background: #2F90FE;
       }
     }
   }
@@ -64,7 +64,7 @@ main {
   border-bottom: solid 3px #ccc;
 
   @media (prefers-color-scheme: dark) {
-    border-bottom-color: $darkModeHighlightColour;
+    border-bottom-color: #2F90FE;
   }
 }
 
@@ -91,7 +91,7 @@ a {
     color: inherit;
 
     @media (prefers-color-scheme: dark) {
-      color: darken($darkModeHighlightColour, 10%);
+      color: #2F90FE;
     }
   }
 
